@@ -46,7 +46,7 @@ class PrajnaIngestionPipeline:
         return cls(
             supabase_url=os.environ["SUPABASE_URL"],
             supabase_key=os.environ["SUPABASE_SERVICE_KEY"],
-            bucket=os.environ.get("SUPABASE_BUCKET", "prajna-raw"),
+            bucket=os.environ.get("SUPABASE_BUCKET", "Prajna_raw"),
             prajna_url=os.environ["PRAJNA_API_URL"],
             ingest_secret=os.environ["PRAJNA_INGEST_SECRET"],
         )

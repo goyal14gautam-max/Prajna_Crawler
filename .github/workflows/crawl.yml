@@ -57,7 +57,7 @@ jobs:
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          SUPABASE_BUCKET: prajna-raw
+          SUPABASE_BUCKET: Prajna_raw
           PRAJNA_API_URL: ${{ secrets.PRAJNA_API_URL }}
           PRAJNA_INGEST_SECRET: ${{ secrets.PRAJNA_INGEST_SECRET }}
         run: |
