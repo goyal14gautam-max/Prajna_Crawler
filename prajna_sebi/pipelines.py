@@ -83,9 +83,15 @@ class PrajnaIngestionPipeline:
     def process_item(self, item, spider):
         adapter = ItemAdapter(item)
         sha = adapter["sha256"]
+        body_len = len(adapter.get("pdf_body") or b"")
+
+        spider.logger.info(
+            "[PIPE-ENTER] sha=%s body_bytes=%d title=%r",
+            sha[:12], body_len, (adapter.get("title") or "")[:60],
+        )
 
         if sha in self.existing_hashes:
-            spider.logger.debug("Skip (already ingested): %s", sha)
+            spider.logger.info("[PIPE-SKIP] already ingested: %s", sha[:12])
             return item
 
         # Build storage path: source/yyyy/mm/sha256.pdf
@@ -96,38 +102,59 @@ class PrajnaIngestionPipeline:
         storage_path = f"{source}/{yyyy}/{mm}/{sha}.pdf"
 
         # Step 1 — upload PDF to Supabase Storage
+        spider.logger.info("[STEP1-UPLOAD-START] %s", storage_path)
         try:
-            self.client.storage.from_(self.bucket).upload(
+            upload_result = self.client.storage.from_(self.bucket).upload(
                 storage_path,
                 adapter["pdf_body"],
                 {"content-type": "application/pdf", "upsert": "true"},
             )
-            spider.logger.info("Uploaded: %s", storage_path)
+            spider.logger.info(
+                "[STEP1-UPLOAD-OK] %s result_type=%s",
+                storage_path, type(upload_result).__name__,
+            )
         except Exception as exc:
             spider.logger.error(
-                "Storage upload failed for %s: %s", sha, exc
+                "[STEP1-UPLOAD-FAIL] %s exc_type=%s msg=%s",
+                storage_path, type(exc).__name__, exc,
             )
-            raise
+            return item  # Continue to next item instead of raising
 
         # Step 2 — get signed URL (1 hour expiry — enough for ingest)
-        # supabase-py's response shape varies by version: signedURL (legacy),
-        # signedUrl (mid), signed_url (2.x snake_case). Check all three.
-        signed = self.client.storage.from_(self.bucket).create_signed_url(
-            storage_path, 3600
+        spider.logger.info("[STEP2-SIGNURL-START] %s", storage_path)
+        try:
+            signed = self.client.storage.from_(self.bucket).create_signed_url(
+                storage_path, 3600
+            )
+        except Exception as exc:
+            spider.logger.error(
+                "[STEP2-SIGNURL-EXC] %s exc_type=%s msg=%s",
+                storage_path, type(exc).__name__, exc,
+            )
+            return item
+
+        spider.logger.info(
+            "[STEP2-SIGNURL-RESP] type=%s keys=%s repr=%s",
+            type(signed).__name__,
+            list(signed.keys()) if isinstance(signed, dict) else "N/A",
+            repr(signed)[:300],
         )
-        signed_url = (
-            signed.get("signedURL")
-            or signed.get("signedUrl")
-            or signed.get("signed_url")
-        )
+
+        signed_url = None
+        if isinstance(signed, dict):
+            signed_url = (
+                signed.get("signedURL")
+                or signed.get("signedUrl")
+                or signed.get("signed_url")
+            )
+        elif isinstance(signed, str):
+            signed_url = signed
 
         if not signed_url:
             spider.logger.error(
-                "No signed URL for %s — response keys: %s",
-                storage_path,
-                list(signed.keys()) if isinstance(signed, dict) else type(signed).__name__,
+                "[STEP2-SIGNURL-NONE] %s — could not extract URL", storage_path,
             )
-            raise ValueError(f"Could not get signed URL for {storage_path}")
+            return item
 
         # Step 3 — build safe display name from title
         title = adapter.get("title") or sha
@@ -156,6 +183,11 @@ class PrajnaIngestionPipeline:
         max_retries = 3
         ingested = False
 
+        spider.logger.info(
+            "[STEP4-POST-START] sha=%s safe_title=%r",
+            sha[:12], safe_title[:60],
+        )
+
         for attempt in range(max_retries):
             try:
                 resp = requests.post(
@@ -165,11 +197,16 @@ class PrajnaIngestionPipeline:
                     timeout=120,
                 )
 
+                spider.logger.info(
+                    "[STEP4-POST-RESP] attempt=%d status=%d body=%s",
+                    attempt + 1, resp.status_code, resp.text[:200],
+                )
+
                 if resp.status_code == 200:
                     result = resp.json()
                     spider.logger.info(
-                        "Ingested: %s -> doc_id=%s chunks=%s",
-                        safe_title,
+                        "[STEP4-POST-OK] sha=%s doc_id=%s chunks=%s",
+                        sha[:12],
                         result.get("document_id"),
                         result.get("chunks_created"),
                     )
@@ -179,24 +216,21 @@ class PrajnaIngestionPipeline:
 
                 elif resp.status_code == 409:
                     # Already exists — race condition or late dedup catch
-                    spider.logger.info(
-                        "Already exists (409): %s", sha
-                    )
+                    spider.logger.info("[STEP4-POST-DUP] sha=%s", sha[:12])
                     self.existing_hashes.add(sha)
                     ingested = True
                     break
 
                 else:
                     spider.logger.warning(
-                        "Ingest attempt %d failed: %s %s",
-                        attempt + 1,
-                        resp.status_code,
-                        resp.text[:300],
+                        "[STEP4-POST-FAIL] attempt=%d status=%d body=%s",
+                        attempt + 1, resp.status_code, resp.text[:200],
                     )
 
             except requests.RequestException as exc:
                 spider.logger.warning(
-                    "Request error attempt %d: %s", attempt + 1, exc
+                    "[STEP4-POST-EXC] attempt=%d exc_type=%s msg=%s",
+                    attempt + 1, type(exc).__name__, exc,
                 )
 
             if attempt < max_retries - 1:
@@ -204,7 +238,8 @@ class PrajnaIngestionPipeline:
 
         if not ingested:
             spider.logger.error(
-                "Failed to ingest after %d attempts: %s", max_retries, sha
+                "[STEP4-POST-GIVEUP] sha=%s after %d attempts",
+                sha[:12], max_retries,
             )
 
         # Free memory — drop binary body
