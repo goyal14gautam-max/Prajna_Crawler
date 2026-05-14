@@ -1,0 +1,106 @@
+name: Prajna Legal Crawler
+
+on:
+  schedule:
+    # Every Sunday at 11:30 PM IST (18:00 UTC)
+    - cron: '0 18 * * 0'
+  workflow_dispatch:
+    inputs:
+      spider:
+        description: 'Spider: sebi_legal / rbi_legal / mca_legal / all'
+        required: false
+        default: 'all'
+      since:
+        description: 'Crawl docs newer than YYYY-MM-DD (blank = last 7 days)'
+        required: false
+      max_docs:
+        description: 'Max documents per spider (blank = unlimited)'
+        required: false
+        default: '100'
+
+jobs:
+  crawl:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    strategy:
+      fail-fast: false
+      matrix:
+        spider: [sebi_legal, rbi_legal, mca_legal]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Skip if not target spider
+        id: check
+        run: |
+          INPUT="${{ github.event.inputs.spider }}"
+          if [ -n "$INPUT" ] && [ "$INPUT" != "all" ] && [ "$INPUT" != "${{ matrix.spider }}" ]; then
+            echo "skip=true" >> $GITHUB_OUTPUT
+          else
+            echo "skip=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Set up Python
+        if: steps.check.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Install dependencies
+        if: steps.check.outputs.skip != 'true'
+        run: pip install -r requirements.txt
+
+      - name: Run spider
+        if: steps.check.outputs.skip != 'true'
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          SUPABASE_BUCKET: prajna-raw
+          PRAJNA_API_URL: ${{ secrets.PRAJNA_API_URL }}
+          PRAJNA_INGEST_SECRET: ${{ secrets.PRAJNA_INGEST_SECRET }}
+        run: |
+          mkdir -p logs
+
+          # Determine since date
+          if [ "${{ github.event_name }}" = "schedule" ]; then
+            SINCE=$(date -d '7 days ago' +%Y-%m-%d 2>/dev/null || date -v-7d +%Y-%m-%d)
+          else
+            SINCE="${{ github.event.inputs.since }}"
+          fi
+
+          # Build args
+          ARGS=""
+          [ -n "$SINCE" ] && ARGS="$ARGS -a since=$SINCE"
+
+          # max_docs — apply on manual runs only
+          # scheduled runs are naturally small (7 days of docs)
+          if [ "${{ github.event_name }}" != "schedule" ]; then
+            MAX="${{ github.event.inputs.max_docs }}"
+            [ -n "$MAX" ] && ARGS="$ARGS -a max_docs=$MAX"
+          fi
+
+          scrapy crawl ${{ matrix.spider }} $ARGS \
+            --logfile logs/${{ matrix.spider }}.log \
+            --loglevel INFO
+
+      - name: Upload logs
+        if: always() && steps.check.outputs.skip != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ matrix.spider }}-${{ github.run_id }}
+          path: logs/
+          retention-days: 14
+
+      - name: Notify on failure
+        if: failure() && steps.check.outputs.skip != 'true'
+        env:
+          SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          if [ -n "$SLACK_WEBHOOK" ]; then
+            curl -s -X POST \
+              -H 'Content-type: application/json' \
+              --data "{\"text\":\"X ${{ matrix.spider }} crawl failed - run ${{ github.run_id }}\"}" \
+              "$SLACK_WEBHOOK"
+          fi

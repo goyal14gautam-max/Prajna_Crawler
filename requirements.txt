@@ -1,0 +1,5 @@
+scrapy>=2.11
+supabase>=2.3
+requests>=2.31
+itemadapter>=0.9
+python-dotenv>=1.0
