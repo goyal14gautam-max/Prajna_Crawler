@@ -110,13 +110,23 @@ class PrajnaIngestionPipeline:
             raise
 
         # Step 2 — get signed URL (1 hour expiry — enough for ingest)
+        # supabase-py's response shape varies by version: signedURL (legacy),
+        # signedUrl (mid), signed_url (2.x snake_case). Check all three.
         signed = self.client.storage.from_(self.bucket).create_signed_url(
             storage_path, 3600
         )
-        signed_url = signed.get("signedURL") or signed.get("signedUrl")
+        signed_url = (
+            signed.get("signedURL")
+            or signed.get("signedUrl")
+            or signed.get("signed_url")
+        )
 
         if not signed_url:
-            spider.logger.error("No signed URL for %s", storage_path)
+            spider.logger.error(
+                "No signed URL for %s — response keys: %s",
+                storage_path,
+                list(signed.keys()) if isinstance(signed, dict) else type(signed).__name__,
+            )
             raise ValueError(f"Could not get signed URL for {storage_path}")
 
         # Step 3 — build safe display name from title
