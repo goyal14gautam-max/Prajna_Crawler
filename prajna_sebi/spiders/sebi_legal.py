@@ -165,18 +165,21 @@ class SebiLegalSpider(scrapy.Spider):
                 },
             )
 
-        # Pagination
+        # Pagination — SEBI's "Next" button is often a javascript: onclick handler
+        # rather than a real href, so skip anything that isn't an http(s) URL.
         if not self._limit_reached():
             next_href = response.css(
                 'a[rel="next"]::attr(href), '
                 'a:contains("Next")::attr(href)'
             ).get()
-            if next_href:
-                yield scrapy.Request(
-                    urljoin(response.url, next_href),
-                    callback=self.parse_listing,
-                    meta={"category": category, "page": page + 1},
-                )
+            if next_href and not next_href.lower().startswith(("javascript:", "#")):
+                next_url = urljoin(response.url, next_href)
+                if next_url.startswith(("http://", "https://")):
+                    yield scrapy.Request(
+                        next_url,
+                        callback=self.parse_listing,
+                        meta={"category": category, "page": page + 1},
+                    )
 
     def parse_detail(self, response: Response):
         if self._limit_reached():
